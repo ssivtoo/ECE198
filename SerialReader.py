@@ -5,21 +5,22 @@ BAUD = 115200
 
 def parse_line(line: str):
     """
-    Input:  '532,123'
-    Output: (light, sound) as ints
+    Input:  '532,123,45.5'
+    Output: (light, sound, weight) as ints/floats
     """
     parts = line.split(",")
-    if len(parts) != 2:
+    if len(parts) != 3:
         return None
 
     try:
         light = int(parts[0])
         sound = int(parts[1])
-        return light, sound
+        weight = float(parts[2])
+        return light, sound, weight
     except ValueError:
         return None
 
-def interpret(light: int, sound: int) -> str:
+def interpret(light: int, sound: int, weight: float) -> str:
     """
     Turn raw numbers into simple meaning.
     You can change these thresholds to whatever you want.
@@ -38,7 +39,14 @@ def interpret(light: int, sound: int) -> str:
     else:
         sound_status = "Loud"
 
-    return f"Light: {light} ({light_status}), Sound: {sound} ({sound_status})"
+    if weight < 10:
+        weight_status = "Empty"
+    elif weight < 200:
+        weight_status = "Partial"
+    else:
+        weight_status = "Full"
+
+    return f"Light: {light} ({light_status}), Sound: {sound} ({sound_status}), Weight: {weight:.1f}g ({weight_status})"
 
 def main():
     with serial.Serial(PORT, BAUD, timeout=1) as ser:
@@ -53,8 +61,8 @@ def main():
                 print("Bad line:", raw)
                 continue
 
-            light, sound = data
-            meaning = interpret(light, sound)
+            light, sound, weight = data
+            meaning = interpret(light, sound, weight)
             print(meaning)
 
 if __name__ == "__main__":
