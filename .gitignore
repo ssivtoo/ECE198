@@ -1,0 +1,3 @@
+__pycache__/*.pyc
+test_serial_reader.py
+Calibration/Calibration.ino
