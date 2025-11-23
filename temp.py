@@ -3,12 +3,12 @@ import time
 import tkinter as tk
 
 # ---------- SERIAL SETTINGS ----------
-PORT = "/dev/cu.usbmodem14101"   # e.g. "COM3" on Windows
+PORT = "/dev/cu.usbmodem101"   # e.g. "COM3" on Windows
 BAUD = 115200
 
 
 # ---------- PARSE ARDUINO LINE ----------
-# Arduino sends: lavg,smag,weight
+# Arduino sends: light,sound,weight (raw reading) 
 def parse_line(line: str):
     parts = line.split(",")
     if len(parts) != 3:
@@ -44,10 +44,17 @@ class RoomEnvironmentGUI:
         self.last_weight = None
         self.last_drink_time = None
 
+        # hydration state / alerts
         self.reminder_active = False
         self.reminder_time = None
         self.nurse_escalation = False
         self.critical_alert = False
+
+        # new: refill tracking & drink rate
+        self.last_refill_time = None
+        self.refill_level = None
+        self.drink_rate_per_hr = 0.0
+        self.drink_rate_slow = False
 
         # thresholds
         self.DRINK_EVENT_DROP_RATIO = 0.05   # 5% of full bottle
@@ -146,6 +153,12 @@ class RoomEnvironmentGUI:
         self.last_drink_time = now
         self.weight_history = [(now, self.weight_baseline)]
 
+        # treat baseline as a fresh refill
+        self.last_refill_time = now
+        self.refill_level = self.weight_baseline
+        self.drink_rate_per_hr = 0.0
+        self.drink_rate_slow = False
+
         self.env_frame.config(bg="#00ff00")
         self.env_label.config(
             text="ENVIRONMENT NORMAL",
@@ -178,10 +191,16 @@ class RoomEnvironmentGUI:
         # hydration tile status (NORMAL / LOW)
         hydr_status, hydr_red = self.classify_hydration_tile(ratio)
 
+        # build hydration status text with rate (e.g., "LOW (8.5%/hr)")
+        rate_str = "--"
+        if self.last_refill_time is not None:
+            rate_str = f"{self.drink_rate_per_hr:.1f}%/hr"
+        hydr_status_text = f"{hydr_status} ({rate_str})"
+
         # update tiles (values only)
         self.update_box(self.light_box, light, light_status, light_red)
         self.update_box(self.noise_box, noise, noise_status, noise_red)
-        self.update_box(self.hydr_box, f"{int(ratio * 100)}%", hydr_status, hydr_red)
+        self.update_box(self.hydr_box, f"{int(ratio * 100)}%", hydr_status_text, hydr_red)
 
         # global bar
         self.update_environment_bar(light_red, noise_red, hydr_red, ratio)
@@ -204,13 +223,12 @@ class RoomEnvironmentGUI:
             return "NORMAL", False
 
     def classify_hydration_tile(self, ratio):
-        # LOW if <20% or any hydration alert active
-        if (
-            ratio < self.CRITICAL_RATIO
-            or self.reminder_active
-            or self.nurse_escalation
-            or self.critical_alert
-        ):
+        """
+        LOW when:
+          - bottle is effectively empty (critical_alert), or
+          - drink rate is too slow
+        """
+        if self.critical_alert or self.drink_rate_slow:
             return "LOW", True
         else:
             return "NORMAL", False
@@ -243,63 +261,52 @@ class RoomEnvironmentGUI:
             self.nurse_escalation = False
             self.critical_alert = False
 
+            # new refill baseline for rate calculation
+            self.last_refill_time = now
+            self.refill_level = weight
+            self.drink_rate_per_hr = 0.0
+            self.drink_rate_slow = False
+
     def update_hydration_logic(self, current_weight, ratio, now):
-        # critical if bottle < 20%
-        self.critical_alert = ratio < self.CRITICAL_RATIO
+        """
+        New logic assuming current_weight is already a calibrated percentage value
+        (0–100% of bottle fullness):
+          - critical_alert when bottle effectively empty
+          - compute drink rate since last refill (in %/hr)
+          - drink_rate_slow flag if rate is below threshold
+        """
+        # 1) Critical if empty or almost empty
+        # Treat <= 1% as effectively empty
+        self.critical_alert = ratio <= 0.01
 
-        # 2‑hour drink rate
-        two_hours_ago = now - 2 * 60 * 60
-        past_weights = [w for t, w in self.weight_history if t <= two_hours_ago]
-        if past_weights:
-            start_weight = past_weights[-1]
-        else:
-            start_weight = self.weight_history[0][1] if self.weight_history else current_weight
+        # 2) Compute drink rate since last refill
+        self.drink_rate_per_hr = 0.0
+        self.drink_rate_slow = False
 
-        consumed = max(0.0, start_weight - current_weight)
-        consumed_pct_2h = 0.0
-        if self.weight_baseline and self.weight_baseline != 0:
-            consumed_pct_2h = (consumed / self.weight_baseline) * 100.0
-
-        if self.last_drink_time is None:
-            self.last_drink_time = now
-        time_since_drink = now - self.last_drink_time
-
-        # poor drink rate -> reminder
         if (
-            time_since_drink >= self.REMINDER_DELAY_SEC
-            and consumed_pct_2h < self.TARGET_2H_PCT
-            and not self.reminder_active
+            self.last_refill_time is not None
+            and self.refill_level is not None
+            and self.weight_baseline
+            and self.weight_baseline != 0
         ):
-            self.reminder_active = True
-            self.reminder_time = now
+            elapsed_hours = (now - self.last_refill_time) / 3600.0
+            if elapsed_hours > 0:
+                consumed = max(0.0, self.refill_level - current_weight)
+                # convert to % of a full bottle
+                consumed_pct = (consumed / self.weight_baseline) * 100.0
+                self.drink_rate_per_hr = consumed_pct / elapsed_hours
 
-        # reminder ignored for 10 min -> nurse escalation
-        if self.reminder_active and self.reminder_time is not None:
-            if (now - self.reminder_time >= self.REMINDER_ESCALATE_SEC
-                    and self.last_drink_time < self.reminder_time):
-                self.nurse_escalation = True
+                # 3) Mark as "too slow" if rate below threshold and not empty
+                MIN_RATE = 10.0  # minimum acceptable drink rate in %/hr
+                if not self.critical_alert and self.drink_rate_per_hr < MIN_RATE:
+                    self.drink_rate_slow = True
 
     # ---------- UI HELPERS ----------
     def update_box(self, box, value, status_text, is_red):
-    color = "#ff0000" if is_red else "#00ff00"
-
-    # Color the entire box
-    box["frame"].config(bg=color)
-
-    # Text blends into the box (same background)
-    box["value"].config(
-        text=str(value),
-        bg=color,
-        fg="black",   # black text
-        font=("Helvetica", 26, "bold")
-    )
-
-    box["status"].config(
-        text=f"STATUS: {status_text}",
-        bg=color,
-        fg="black",   # black text
-        font=("Helvetica", 14, "bold")
-    )
+        color = "#ff0000" if is_red else "#00ff00"
+        box["frame"].config(bg=color)
+        box["value"].config(text=str(value), bg=color)
+        box["status"].config(text=f"STATUS: {status_text}", bg=color)
 
     def update_environment_bar(self, light_red, noise_red, hydr_red, ratio):
         if noise_red:
@@ -311,12 +318,10 @@ class RoomEnvironmentGUI:
             bg = "#ff0000"
             fg = "#ffffff"
         elif hydr_red:
-            if self.critical_alert or ratio < self.CRITICAL_RATIO:
-                text = "ALERT: HYDRATION CRITICAL! REFILL THE WATER BOTTLE NOW."
-            elif self.nurse_escalation:
-                text = "ALERT: PATIENT IGNORED HYDRATION REMINDERS. NURSE CHECK REQUIRED."
-            elif self.reminder_active:
-                text = "REMINDER: PATIENT SHOULD DRINK WATER TO STAY HYDRATED."
+            if self.critical_alert:
+                text = "ALERT: BOTTLE EMPTY! NURSE CHECK REQUIRED."
+            elif self.drink_rate_slow:
+                text = "ALERT: PATIENT DRINKING TOO SLOW. CHECK HYDRATION PLAN."
             else:
                 text = "ALERT: HYDRATION LOW. CHECK THE PATIENT'S WATER LEVEL."
             bg = "#ff0000"
