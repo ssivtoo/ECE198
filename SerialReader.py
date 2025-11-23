@@ -13,8 +13,8 @@ def parse_line(line: str):
         return None
 
     try:
-        sound = int(parts[0])
-        light = int(parts[1])
+        sound = int(parts[1])
+        light = int(parts[0])
         weight = float(parts[2])
         return light, sound, weight
     except ValueError:

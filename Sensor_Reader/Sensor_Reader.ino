@@ -26,9 +26,9 @@ void loop() {
   float weight = scale.get_units(1);  // get weight reading
 
   // simple CSV-style output: sound,light,weight
-  Serial.print(soundRaw);
-  Serial.print(",");
   Serial.print(lightRaw);
+  Serial.print(",");
+  Serial.print(soundRaw);
   Serial.print(",");
   Serial.println(weight);
 

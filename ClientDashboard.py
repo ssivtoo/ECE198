@@ -1,18 +1,19 @@
 import serial
 import tkinter as tk
+import datetime
 
 # ---------------- SERIAL SETTINGS ----------------
 
 # CHANGE THIS TO YOUR ACTUAL ARDUINO PORT
-PORT = "/dev/cu.usbmodem14101"   # e.g. "COM3" on Windows
+PORT = "/dev/cu.usbmodem101"   # e.g. "COM3" on Windows
 BAUD = 115200
 
 
 # ---------------- PARSE ARDUINO LINE ----------------
-# Arduino sends: lavg,smag,weight
+# Arduino sends: Sound,light,Weight (raw reading)
 # Example: "601,71,-442.49"
 
-def parse_line(line: str):
+def parse_line(line):
     parts = line.split(",")
     if len(parts) != 3:
         return None
@@ -28,9 +29,10 @@ def parse_line(line: str):
 # ---------------- GUI APP ----------------
 
 class BaselineMonitor:
-    def __init__(self, root, ser):
+    def __init__(self, root, ser, log_file=None):
         self.root = root
         self.ser = ser
+        self.log_file = log_file
 
         self.root.title("Baseline Monitor (Light / Noise / Hydration)")
         self.root.geometry("850x450")
@@ -46,8 +48,8 @@ class BaselineMonitor:
         self.sample_list = []           # list of (light, noise, weight)
 
         # update intervals
-        self.update_ms = 500            # fast while calibrating
-        self.update_ms_after_baseline = 30000   # 30 seconds
+        self.update_ms = 100            # fast while calibrating
+        self.update_ms_after_baseline = 100   # 1 seconds
 
         # ------------- UI -------------
         title = tk.Label(
@@ -63,6 +65,15 @@ class BaselineMonitor:
             font=("Arial", 11)
         )
         self.info_label.pack(pady=5)
+
+        # warning area
+        self.warning_label = tk.Label(
+            root,
+            text="",
+            font=("Arial", 11),
+            fg="red"
+        )
+        self.warning_label.pack(pady=5)
 
         main = tk.Frame(root)
         main.pack(expand=True, fill="both", padx=10, pady=10)
@@ -117,9 +128,19 @@ class BaselineMonitor:
             pass
 
         data = parse_line(raw) if raw else None
+        print(data)
 
         if data:
             light, noise, weight = data
+
+            # log to file if available
+            if self.log_file:
+                ts = datetime.datetime.now().isoformat()
+                try:
+                    self.log_file.write(f"{ts},{light},{noise},{weight}\n")
+                    self.log_file.flush()
+                except Exception:
+                    pass
 
             if self.calibrating:
                 self.sample_list.append((light, noise, weight))
@@ -172,7 +193,7 @@ class BaselineMonitor:
 
     def update_boxes(self, light, noise, weight):
         # LIGHT (higher = worse)
-        self._update_one(
+        light_bad = self._update_one(
             self.light_box,
             current=light,
             baseline=self.light_baseline,
@@ -180,7 +201,7 @@ class BaselineMonitor:
         )
 
         # NOISE (higher = worse)
-        self._update_one(
+        noise_bad = self._update_one(
             self.noise_box,
             current=noise,
             baseline=self.noise_baseline,
@@ -188,13 +209,27 @@ class BaselineMonitor:
         )
 
         # HYDRATION (lower = worse)
-        self._update_one(
+        hydr_bad = self._update_one(
             self.hydr_box,
             current=weight,
             baseline=self.weight_baseline,
             higher_is_bad=False,
             is_weight=True
         )
+
+        # Set warning text based on bad conditions
+        warnings = []
+        if noise_bad:
+            warnings.append("Too loud")
+        if light_bad:
+            warnings.append("Too bright")
+        if hydr_bad:
+            warnings.append("Bottle low")
+
+        if warnings:
+            self.warning_label.config(text=" / ".join(warnings))
+        else:
+            self.warning_label.config(text="")
 
     # ---------------- LOGIC (MARGIN = 0.5, PURE RED/GREEN) ----------------
 
@@ -227,30 +262,36 @@ class BaselineMonitor:
             if current > baseline + margin:
                 status = "Above baseline"
                 color = "#ff0000"   # PURE RED
+                is_bad = True
             else:
                 status = "Within baseline range"
                 color = "#00ff00"   # PURE GREEN
+                is_bad = False
         else:
             # hydration: lower than baseline-margin means water used (bad)
             if current < baseline - margin:
                 status = "Below baseline (water used)"
                 color = "#ff0000"   # PURE RED
+                is_bad = True
             else:
                 status = "Within baseline range"
                 color = "#00ff00"   # PURE GREEN
+                is_bad = False
 
         box["status"].config(text=f"Status: {status}")
         box["frame"].config(bg=color)
         for w in box["frame"].winfo_children():
             w.config(bg=color)
 
+        return is_bad
+
 
 # ---------------- MAIN ENTRY ----------------
 
 def main():
-    with serial.Serial(PORT, BAUD, timeout=1) as ser:
+    with serial.Serial(PORT, BAUD, timeout=1) as ser, open("readings.csv", "a") as log_file:
         root = tk.Tk()
-        app = BaselineMonitor(root, ser)
+        app = BaselineMonitor(root, ser, log_file)
         root.mainloop()
 
 
