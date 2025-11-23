@@ -9,7 +9,7 @@ BAUD = 115200
 
 # ---------- PARSE ARDUINO LINE ----------
 # Arduino sends: light,sound,weight_pct (0-100 after your calibration)
-def parse_line(line: str):
+def parse_line(line):
     parts = line.split(",")
     if len(parts) != 3:
         return None
