@@ -281,10 +281,25 @@ class RoomEnvironmentGUI:
 
     # ---------- UI HELPERS ----------
     def update_box(self, box, value, status_text, is_red):
-        color = "#ff0000" if is_red else "#00ff00"
-        box["frame"].config(bg=color)
-        box["value"].config(text=str(value), bg=color)
-        box["status"].config(text=f"STATUS: {status_text}", bg=color)
+    color = "#ff0000" if is_red else "#00ff00"
+
+    # Color the entire box
+    box["frame"].config(bg=color)
+
+    # Text blends into the box (same background)
+    box["value"].config(
+        text=str(value),
+        bg=color,
+        fg="black",   # black text
+        font=("Helvetica", 26, "bold")
+    )
+
+    box["status"].config(
+        text=f"STATUS: {status_text}",
+        bg=color,
+        fg="black",   # black text
+        font=("Helvetica", 14, "bold")
+    )
 
     def update_environment_bar(self, light_red, noise_red, hydr_red, ratio):
         if noise_red:
