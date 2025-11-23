@@ -3,7 +3,7 @@ import time
 import tkinter as tk
 
 # ---------- SERIAL SETTINGS ----------
-PORT = "/dev/cu.usbmodem101"   # e.g. "COM3" on Windows
+PORT = "/dev/cu.usbmodem101"
 BAUD = 115200
 
 
@@ -33,7 +33,7 @@ class RoomEnvironmentGUI:
         # ----- baselines -----
         self.light_baseline = 0.0
         self.noise_baseline = 0.0
-        self.weight_baseline = 0.0  # track percent at calibration
+        self.weight_baseline = 0.0
 
         self.calibrating = True
         self.samples_needed = 20
@@ -230,7 +230,7 @@ class RoomEnvironmentGUI:
                                                                 # 3600.0 for normal hour
         consumed = max(0.0, self.refill_level_pct - current_pct)
         self.drink_rate_per_hr = consumed / elapsed_hours
-        self.drink_rate_slow = self.drink_rate_per_hr < self.SLOW_RATE_THRESHOLD
+        self.drink_rate_slow = self.drink_rate_per_hr < self.SLOW_RATE_THRESHOLD and self.drink_rate_per_hr != 0
         self.is_empty = current_pct <= self.EMPTY_THRESHOLD
         self.last_weight_pct = current_pct
 
