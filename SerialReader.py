@@ -1,6 +1,6 @@
 import serial
 
-PORT = "/dev/cu.usbmodem14101"
+PORT = "/dev/cu.usbmodem101"
 BAUD = 115200
 
 def parse_line(line: str):
@@ -13,8 +13,8 @@ def parse_line(line: str):
         return None
 
     try:
-        light = int(parts[0])
-        sound = int(parts[1])
+        sound = int(parts[0])
+        light = int(parts[1])
         weight = float(parts[2])
         return light, sound, weight
     except ValueError:
@@ -49,21 +49,39 @@ def interpret(light: int, sound: int, weight: float) -> str:
     return f"Light: {light} ({light_status}), Sound: {sound} ({sound_status}), Weight: {weight:.1f}g ({weight_status})"
 
 def main():
-    with serial.Serial(PORT, BAUD, timeout=1) as ser:
-        print("Connected to", PORT)
-        while True:
-            raw = ser.readline().decode("utf-8", errors="ignore").strip()
-            if not raw:
-                continue   # nothing received this loop
+    try:
+        with serial.Serial(PORT, BAUD, timeout=1) as ser:
+            print("Connected to", PORT, "- press Ctrl+C to quit")
+            while True:
+                try:
+                    # read one line from serial
+                    raw_bytes = ser.readline()
+                except serial.SerialException as e:
+                    # handle unplug / serial error without crashing
+                    print("Serial connection lost:", e)
+                    print("Exiting cleanly.")
+                    break
 
-            data = parse_line(raw)
-            if not data:
-                print("Bad line:", raw)
-                continue
+                if not raw_bytes:
+                    continue  # nothing this loop
 
-            light, sound, weight = data
-            meaning = interpret(light, sound, weight)
-            print(meaning)
+                raw = raw_bytes.decode("utf-8", errors="ignore").strip()
+
+                data = parse_line(raw)
+                if not data:
+                    print("Bad line:", raw)
+                    continue
+
+                light, sound, weight = data
+                meaning = interpret(light, sound, weight)
+                print(meaning)
+
+    except serial.SerialException as e:
+        # could not open port, or other error at start
+        print(f"Could not open serial port {PORT}: {e}")
+    except KeyboardInterrupt:
+        # user hit Ctrl+C
+        print("\nStopped by user.")
 
 if __name__ == "__main__":
     main()
