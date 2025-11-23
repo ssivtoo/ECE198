@@ -1,12 +1,55 @@
-class MonitorGUI:
-    def __init__(self, root, ser):
-        self.root = root
-        self.ser = ser
+import tkinter as tk
+from tkinter import font as tkfont
+import random
 
-        self.root.title("Bedside Environment Monitor")
+
+def classify(light: int, sound: int):
+    """
+    Same idea as your interpret(): convert numbers into statuses.
+    """
+    # Light
+    if light < 200:
+        light_status = "Dark"
+    elif light < 600:
+        light_status = "Medium"
+    else:
+        light_status = "Bright"
+
+    # Noise
+    if sound < 200:
+        sound_status = "Quiet"
+    elif sound < 600:
+        sound_status = "Normal"
+    else:
+        sound_status = "Loud"
+
+    return {
+        "light": light,
+        "sound": sound,
+        "light_status": light_status,
+        "sound_status": sound_status,
+    }
+
+
+def status_color(status: str) -> str:
+    s = status.lower()
+    if s in ("dark", "medium", "quiet", "normal", "ok"):
+        return "#c8f7c5"   # green-ish
+    if s in ("bright", "loud", "high"):
+        return "#ff0000"   # yellow-ish
+    if s in ("low",):
+        return "#ff0000"   # red-ish
+    return "#ff0000"       # white
+
+
+class MonitorGUI:
+    def __init__(self, root):
+        self.root = root
+
+        self.root.title("Bedside Environment Monitor (TEST MODE)")
         self.root.geometry("900x450")
 
-        # Fonts
+        # fonts
         self.title_font = tkfont.Font(size=18, weight="bold")
         self.value_font = tkfont.Font(size=24, weight="bold")
         self.status_font = tkfont.Font(size=14, weight="bold")
@@ -14,11 +57,11 @@ class MonitorGUI:
         # Title
         tk.Label(
             root,
-            text="ROOM ENVIRONMENT STATUS (LIGHT / NOISE / HYDRATION*)",
+            text="ROOM ENVIRONMENT STATUS (TEST DATA)",
             font=self.title_font,
         ).pack(pady=10)
 
-        # Frame for 3 boxes
+        # frame for 3 boxes
         boxes = tk.Frame(root)
         boxes.pack(expand=True, fill="both", pady=5)
         boxes.columnconfigure(0, weight=1)
@@ -31,25 +74,30 @@ class MonitorGUI:
         # NOISE box
         self.noise_box = self._make_box(boxes, 1, "NOISE")
 
-        # HYDRATION box (UI only for now)
-        self.hyd_box = self._make_box(boxes, 2, "HYDRATION*")
+        # HYDRATION placeholder box
+        self.hyd_box = self._make_box(boxes, 2, "HYDRATION (coming soon)")
         self.hyd_box["value"].config(text="--")
-        self.hyd_box["status"].config(text="Status: (coming soon)")
+        self.hyd_box["status"].config(text="Status: (inactive)")
 
-        # Nurse alert label
+        # alert label
+        self.alert_font = tkfont.Font(size=24, weight="bold")  # BIG FONT
+
         self.alert_label = tk.Label(
             root,
-            text="Waiting for data...",
-            font=self.status_font,
-            bd=2,
+            text="ALERT: WAITING FOR DATA...",
+            font=self.alert_font,
+            bd=4,
             relief="groove",
-            padx=10,
-            pady=10,
-            wraplength=800,
+            padx=20,
+            pady=20,
+            fg="white",
+            bg="#333333",   # dark background to pop visually
+            wraplength=900,
         )
+
         self.alert_label.pack(pady=10, fill="x", padx=20)
 
-        # Start periodic updates
+        # start periodic updates
         self.update_loop()
 
     def _make_box(self, parent, col, title):
@@ -69,63 +117,57 @@ class MonitorGUI:
 
     def update_loop(self):
         """
-        Periodically:
-        - read a line from serial
-        - parse and classify it
-        - update the GUI
+        TEST MODE:
+        generate fake random values for light and sound
+        so you can see the GUI working without Arduino.
         """
-        try:
-            raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
-        except Exception:
-            raw = ""
+        light = random.randint(0, 800)
+        sound = random.randint(0, 800)
 
-        if raw:
-            data = parse_line(raw)
-            if data:
-                light, sound = data         # for now, only 2 values
-                info = classify(light, sound)
-                self.update_ui(info)
-                # optional: still print console meaning if you want
-                # print(interpret(light, sound))
+        info = classify(light, sound)
+        self.update_ui(info)
 
-        self.root.after(200, self.update_loop)  # 0.2s
+        # run again after 500 ms
+        self.root.after(500, self.update_loop)
 
     def update_ui(self, info: dict):
-        # Light
+        # update LIGHT
         self._update_box(
             self.light_box,
             str(info["light"]),
             info["light_status"],
         )
 
-        # Noise
+        # update NOISE
         self._update_box(
             self.noise_box,
             str(info["sound"]),
             info["sound_status"],
         )
 
-        # Hydration – no data yet; example for future:
-        #
-        # self._update_box(
-        #     self.hyd_box,
-        #     str(info["hydration"]),
-        #     info["hydration_status"],
-        # )
+        # hydration box stays static for now
 
-        # Nurse alert text
+        # nurse alert
         alerts = []
         if info["sound_status"] == "Loud":
             alerts.append("Room is too noisy.")
         if info["light_status"] == "Bright":
             alerts.append("Room is too bright for rest.")
-        # if "hydration_status" in info and info["hydration_status"] == "Low":
-        #     alerts.append("Patient may need to drink water.")
 
+        
         if alerts:
-            self.alert_label.config(text="  |  ".join(alerts))
+            msg = " | ".join(alerts).upper()
+            self.alert_label.config(
+            text=f"ALERT: {msg}",
+            bg="#ff0000",   # RED background when alerting
+            fg="white")
         else:
-            self.alert_label.config(text="Environment is within target range.")
+            self.alert_label.config(
+            text="ENVIRONMENT IS WITHIN TARGET RANGE",
+            bg="#008000",   # GREEN background when safe
+            fg="white"
+        )
+
 
     def _update_box(self, box, value_text, status_text):
         box["value"].config(text=value_text)
@@ -137,14 +179,7 @@ class MonitorGUI:
             w.config(bg=bg)
 
 
-# ================== MAIN ==================
-
-def main():
-    with serial.Serial(PORT, BAUD, timeout=0.5) as ser:
-        root = tk.Tk()
-        app = MonitorGUI(root, ser)
-        root.mainloop()
-
 if __name__ == "__main__":
-    main()
-
+    root = tk.Tk()
+    app = MonitorGUI(root)
+    root.mainloop()
