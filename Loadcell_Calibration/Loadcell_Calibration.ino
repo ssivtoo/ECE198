@@ -37,12 +37,11 @@ void loop() {
   }
 
   // Read the raw average of 10 readings
-  float reading = scale.get_units(10);
+  float rawReading = scale.get_units(1);
 
-  Serial.print("Raw Reading: ");
-  Serial.print(reading);
-  Serial.println(
-      "\t<--- Divide this by your known weight to get the calibration factor.");
+  
+  Serial.println(rawReading);
+  
 
   delay(500);
 }

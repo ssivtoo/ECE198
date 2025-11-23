@@ -49,12 +49,8 @@ class RoomEnvironmentGUI:
         self.reminder_time = None
         self.nurse_escalation = False
         self.critical_alert = False
-
-        # new: refill tracking & drink rate
-        self.last_refill_time = None
-        self.refill_level = None
-        self.drink_rate_per_hr = 0.0
-        self.drink_rate_slow = False
+        # track last message sent to Arduino LCD so we don't spam the port
+        self.last_lcd_msg = None
 
         # thresholds
         self.DRINK_EVENT_DROP_RATIO = 0.05   # 5% of full bottle
@@ -65,7 +61,7 @@ class RoomEnvironmentGUI:
         self.TARGET_2H_PCT = 60.0               # should drink 60% in 2h
 
         # refresh every 1.5s
-        self.update_ms = 1500
+        self.update_ms = 500
 
         # ---------- UI ----------
         title = tk.Label(
@@ -125,6 +121,7 @@ class RoomEnvironmentGUI:
             pass
 
         data = parse_line(raw) if raw else None
+        print(data)
 
         if data:
             light, noise, weight = data
@@ -268,38 +265,55 @@ class RoomEnvironmentGUI:
             self.drink_rate_slow = False
 
     def update_hydration_logic(self, current_weight, ratio, now):
-        """
-        New logic assuming current_weight is already a calibrated percentage value
-        (0–100% of bottle fullness):
-          - critical_alert when bottle effectively empty
-          - compute drink rate since last refill (in %/hr)
-          - drink_rate_slow flag if rate is below threshold
-        """
-        # 1) Critical if empty or almost empty
-        # Treat <= 1% as effectively empty
-        self.critical_alert = ratio <= 0.01
+        # critical if bottle < 20%
+        self.critical_alert = ratio < self.CRITICAL_RATIO
 
-        # 2) Compute drink rate since last refill
-        self.drink_rate_per_hr = 0.0
-        self.drink_rate_slow = False
+        # 2‑hour drink rate
+        two_hours_ago = now - 2 * 60 * 60
+        past_weights = [w for t, w in self.weight_history if t <= two_hours_ago]
+        if past_weights:
+            start_weight = past_weights[-1]
+        else:
+            start_weight = self.weight_history[0][1] if self.weight_history else current_weight
 
+        consumed = max(0.0, start_weight - current_weight)
+        consumed_pct_2h = 0.0
+        if self.weight_baseline and self.weight_baseline != 0:
+            consumed_pct_2h = (consumed / self.weight_baseline) * 100.0
+
+        if self.last_drink_time is None:
+            self.last_drink_time = now
+        time_since_drink = now - self.last_drink_time
+
+        # poor drink rate -> reminder
         if (
-            self.last_refill_time is not None
-            and self.refill_level is not None
-            and self.weight_baseline
-            and self.weight_baseline != 0
+            time_since_drink >= self.REMINDER_DELAY_SEC
+            and consumed_pct_2h < self.TARGET_2H_PCT
+            and not self.reminder_active
         ):
-            elapsed_hours = (now - self.last_refill_time) / 3600.0
-            if elapsed_hours > 0:
-                consumed = max(0.0, self.refill_level - current_weight)
-                # convert to % of a full bottle
-                consumed_pct = (consumed / self.weight_baseline) * 100.0
-                self.drink_rate_per_hr = consumed_pct / elapsed_hours
+            self.reminder_active = True
+            self.reminder_time = now
 
-                # 3) Mark as "too slow" if rate below threshold and not empty
-                MIN_RATE = 10.0  # minimum acceptable drink rate in %/hr
-                if not self.critical_alert and self.drink_rate_per_hr < MIN_RATE:
-                    self.drink_rate_slow = True
+        # reminder ignored for 10 min -> nurse escalation
+        if self.reminder_active and self.reminder_time is not None:
+            if (now - self.reminder_time >= self.REMINDER_ESCALATE_SEC
+                    and self.last_drink_time < self.reminder_time):
+                self.nurse_escalation = True
+
+    # ---------- SERIAL → ARDUINO (LCD MESSAGES) ----------
+    def send_lcd_message(self, msg: str):
+        """
+        Send a short text command to the Arduino so it can display
+        something on the LCD. The Arduino sketch should read a line
+        from Serial and react to these messages.
+        """
+        if not self.ser:
+            return
+        try:
+            self.ser.write((msg + "\n").encode("utf-8"))
+        except Exception:
+            # if serial is gone, just ignore
+            pass
 
     # ---------- UI HELPERS ----------
     def update_box(self, box, value, status_text, is_red):
@@ -309,30 +323,50 @@ class RoomEnvironmentGUI:
         box["status"].config(text=f"STATUS: {status_text}", bg=color)
 
     def update_environment_bar(self, light_red, noise_red, hydr_red, ratio):
+        """
+        Decide the main environment status text AND a short LCD message
+        to send to the Arduino (for a 16x2 style display).
+        """
+        lcd_msg = None
+
         if noise_red:
             text = "ALERT: ROOM IS TOO NOISY! CHECK IN ON THE PATIENT IMMEDIATELY!"
             bg = "#ff0000"
             fg = "#ffffff"
+            lcd_msg = "NOISY"
         elif light_red:
             text = "ALERT: ROOM IS TOO BRIGHT! ADJUST THE LIGHTS FOR THE PATIENT."
             bg = "#ff0000"
             fg = "#ffffff"
+            lcd_msg = "TOO BRIGHT"
         elif hydr_red:
-            if self.critical_alert:
-                text = "ALERT: BOTTLE EMPTY! NURSE CHECK REQUIRED."
-            elif self.drink_rate_slow:
-                text = "ALERT: PATIENT DRINKING TOO SLOW. CHECK HYDRATION PLAN."
+            if self.critical_alert or ratio < self.CRITICAL_RATIO:
+                text = "ALERT: HYDRATION CRITICAL! REFILL THE WATER BOTTLE NOW."
+                lcd_msg = "REFILL NOW"
+            elif self.nurse_escalation:
+                text = "ALERT: PATIENT IGNORED HYDRATION REMINDERS. NURSE CHECK REQUIRED."
+                lcd_msg = "NURSE CHECK"
+            elif self.reminder_active:
+                text = "REMINDER: PATIENT SHOULD DRINK WATER TO STAY HYDRATED."
+                lcd_msg = "DRINK WATER"
             else:
                 text = "ALERT: HYDRATION LOW. CHECK THE PATIENT'S WATER LEVEL."
+                lcd_msg = "LOW WATER"
             bg = "#ff0000"
             fg = "#ffffff"
         else:
             text = "ENVIRONMENT NORMAL"
             bg = "#00ff00"
             fg = "#000000"
+            lcd_msg = "OK"
 
         self.env_frame.config(bg=bg)
         self.env_label.config(text=text, bg=bg, fg=fg)
+
+        # Only send when message changes to avoid spamming the serial link
+        if lcd_msg is not None and lcd_msg != self.last_lcd_msg:
+            self.send_lcd_message(lcd_msg)
+            self.last_lcd_msg = lcd_msg
 
 
 # ---------- MAIN ----------
