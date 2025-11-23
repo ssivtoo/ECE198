@@ -1,126 +1,112 @@
 import serial
+import time
 import tkinter as tk
-import datetime
 
-# ---------------- SERIAL SETTINGS ----------------
-
-# CHANGE THIS TO YOUR ACTUAL ARDUINO PORT
+# ---------- SERIAL SETTINGS ----------
 PORT = "/dev/cu.usbmodem101"   # e.g. "COM3" on Windows
 BAUD = 115200
 
 
-# ---------------- PARSE ARDUINO LINE ----------------
-# Arduino sends: Sound,light,Weight (raw reading)
-# Example: "601,71,-442.49"
-
-def parse_line(line):
+# ---------- PARSE ARDUINO LINE ----------
+# Arduino sends: light,sound,weight_pct (0-100 after your calibration)
+def parse_line(line: str):
     parts = line.split(",")
     if len(parts) != 3:
         return None
     try:
         light = int(parts[0])
         noise = int(parts[1])
-        weight = float(parts[2])
+        weight = float(parts[2])/10.23
         return light, noise, weight
     except ValueError:
         return None
 
 
-# ---------------- GUI APP ----------------
-
-class BaselineMonitor:
-    def __init__(self, root, ser, log_file=None):
+class RoomEnvironmentGUI:
+    def __init__(self, root, ser):
         self.root = root
         self.ser = ser
-        self.log_file = log_file
 
-        self.root.title("Baseline Monitor (Light / Noise / Hydration)")
-        self.root.geometry("850x450")
+        self.root.title("Room Environment Status")
+        self.root.geometry("1000x550")
 
-        # baseline values (set after calibration)
-        self.light_baseline = None
-        self.noise_baseline = None
-        self.weight_baseline = None
+        # ----- baselines -----
+        self.light_baseline = 0.0
+        self.noise_baseline = 0.0
+        self.weight_baseline = 0.0  # track percent at calibration
 
-        # collect first N readings for baseline
         self.calibrating = True
-        self.samples_needed = 20        # how many readings for baseline
-        self.sample_list = []           # list of (light, noise, weight)
+        self.samples_needed = 20
+        self.sample_list = []
 
-        # update intervals
-        self.update_ms = 100            # fast while calibrating
-        self.update_ms_after_baseline = 100   # 1 seconds
+        # ----- hydration tracking (percent-based) -----
+        self.last_weight_pct = None
+        self.last_refill_time = None
+        self.refill_level_pct = None
+        self.drink_rate_per_hr = 0.0
+        self.drink_rate_slow = False
+        self.is_empty = False
+        self.last_lcd_msg = None  # avoid spamming LCD
 
-        # ------------- UI -------------
+        # thresholds
+        self.EMPTY_THRESHOLD = 5.0           # <=5% means empty
+        self.SLOW_RATE_THRESHOLD = 10.0      # <10%/hr is too slow
+        self.REFILL_RISE_MIN = 10.0          # rise by 10% = refill
+
+        # refresh every 0.5s
+        self.update_ms = 500
+
+        # ---------- UI ----------
         title = tk.Label(
             root,
-            text="Monitoring Noise, Light & Hydration (Baseline Based)",
-            font=("Arial", 16, "bold")
+            text="ROOM ENVIRONMENT STATUS",
+            font=("Helvetica", 24, "bold"),
         )
-        title.pack(pady=10)
-
-        self.info_label = tk.Label(
-            root,
-            text="Calibrating baseline from first few seconds...",
-            font=("Arial", 11)
-        )
-        self.info_label.pack(pady=5)
-
-        # warning area
-        self.warning_label = tk.Label(
-            root,
-            text="",
-            font=("Arial", 11),
-            fg="red"
-        )
-        self.warning_label.pack(pady=5)
+        title.pack(pady=15)
 
         main = tk.Frame(root)
-        main.pack(expand=True, fill="both", padx=10, pady=10)
-
+        main.pack(expand=True, fill="both", padx=20, pady=10)
         main.columnconfigure(0, weight=1)
         main.columnconfigure(1, weight=1)
         main.columnconfigure(2, weight=1)
 
         self.light_box = self._make_box(main, 0, "LIGHT")
         self.noise_box = self._make_box(main, 1, "NOISE")
-        self.hydr_box = self._make_box(main, 2, "HYDRATION (Bottle Weight)")
+        self.hydr_box = self._make_box(main, 2, "HYDRATION")
 
-        # start update loop
+        self.env_frame = tk.Frame(root, bd=3, relief="ridge")
+        self.env_frame.pack(fill="x", padx=20, pady=15)
+
+        self.env_label = tk.Label(
+            self.env_frame,
+            text="ENVIRONMENT NORMAL (calibrating...)",
+            font=("Helvetica", 16, "bold"),
+        )
+        self.env_label.pack(padx=10, pady=10)
+
         self.update_loop()
 
     def _make_box(self, parent, col, title):
-        """Create one card for Light / Noise / Hydration."""
-        frame = tk.Frame(parent, bd=2, relief="groove", padx=10, pady=10)
-        frame.grid(row=0, column=col, sticky="nsew", padx=5, pady=5)
+        frame = tk.Frame(parent, bd=2, relief="groove")
+        frame.grid(row=0, column=col, sticky="nsew", padx=10, pady=10)
 
-        t = tk.Label(frame, text=title, font=("Arial", 13, "bold"))
-        t.pack()
+        title_label = tk.Label(frame, text=title, font=("Helvetica", 18, "bold"))
+        title_label.pack(pady=(10, 5))
 
-        baseline_label = tk.Label(frame, text="Baseline: --", font=("Arial", 11))
-        baseline_label.pack(pady=3)
+        value_label = tk.Label(frame, text="--", font=("Helvetica", 26, "bold"))
+        value_label.pack(pady=5)
 
-        current_label = tk.Label(frame, text="Current: --", font=("Arial", 11))
-        current_label.pack(pady=3)
+        status_label = tk.Label(
+            frame,
+            text="STATUS: --",
+            font=("Helvetica", 14, "bold"),
+        )
+        status_label.pack(pady=(5, 15))
 
-        delta_label = tk.Label(frame, text="Change: --", font=("Arial", 11))
-        delta_label.pack(pady=3)
+        return {"frame": frame, "value": value_label, "status": status_label}
 
-        status_label = tk.Label(frame, text="Status: --", font=("Arial", 11, "bold"))
-        status_label.pack(pady=3)
-
-        return {
-            "frame": frame,
-            "baseline": baseline_label,
-            "current": current_label,
-            "delta": delta_label,
-            "status": status_label,
-        }
-
-    # ---------------- MAIN LOOP ----------------
-
+    # ---------- MAIN LOOP ----------
     def update_loop(self):
-        """Read from serial and either calibrate or update UI."""
         raw = ""
         try:
             raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
@@ -128,170 +114,197 @@ class BaselineMonitor:
             pass
 
         data = parse_line(raw) if raw else None
-        print(data)
 
         if data:
             light, noise, weight = data
-
-            # log to file if available
-            if self.log_file:
-                ts = datetime.datetime.now().isoformat()
-                try:
-                    self.log_file.write(f"{ts},{light},{noise},{weight}\n")
-                    self.log_file.flush()
-                except Exception:
-                    pass
+            now = time.time()
 
             if self.calibrating:
                 self.sample_list.append((light, noise, weight))
-                remaining = self.samples_needed - len(self.sample_list)
-
-                if remaining > 0:
-                    self.info_label.config(
-                        text=f"Calibrating baseline... {remaining} samples left"
-                    )
-                else:
-                    self.set_baselines_from_samples()
+                if len(self.sample_list) >= self.samples_needed:
+                    self.set_baselines(now)
             else:
-                self.update_boxes(light, noise, weight)
+                self.handle_measurement(light, noise, weight, now)
+
+        print(now, end="")
+        print(data)
 
         self.root.after(self.update_ms, self.update_loop)
 
-    # ---------------- BASELINE ----------------
-
-    def set_baselines_from_samples(self):
-        """Average the first N samples to get baseline for all 3."""
+    # ---------- BASELINES ----------
+    def set_baselines(self, now):
         n = len(self.sample_list)
-        if n == 0:
-            return
-
         self.light_baseline = sum(s[0] for s in self.sample_list) / n
         self.noise_baseline = sum(s[1] for s in self.sample_list) / n
-        self.weight_baseline = sum(s[2] for s in self.sample_list) / n
+        avg_weight_pct = sum(s[2] for s in self.sample_list) / n
+        self.weight_baseline = avg_weight_pct
 
         self.calibrating = False
         self.sample_list = []
 
-        self.info_label.config(
-            text="Baselines set from first few seconds. Now checking every 30 seconds."
+        # treat baseline as a fresh refill
+        self.last_weight_pct = avg_weight_pct
+        self.last_refill_time = now
+        self.refill_level_pct = avg_weight_pct
+        self.drink_rate_per_hr = 0.0
+        self.drink_rate_slow = False
+        self.is_empty = avg_weight_pct <= self.EMPTY_THRESHOLD
+
+        self.env_frame.config(bg="#00ff00")
+        self.env_label.config(
+            text="ENVIRONMENT NORMAL",
+            bg="#00ff00",
+            fg="#000000",
         )
 
-        self.light_box["baseline"].config(
-            text=f"Baseline: {self.light_baseline:.1f}"
-        )
-        self.noise_box["baseline"].config(
-            text=f"Baseline: {self.noise_baseline:.1f}"
-        )
-        self.hydr_box["baseline"].config(
-            text=f"Baseline (full): {self.weight_baseline:.1f} g"
-        )
+    # ---------- MEASUREMENT HANDLING ----------
+    def handle_measurement(self, light, noise, weight, now):
+        # clamp weight to 0-100% after your calibration
+        current_pct = max(0.0, min(100.0, weight))
 
-        # slow down checks to every 30 seconds
-        self.update_ms = self.update_ms_after_baseline
+        # light + noise status from baselines
+        light_status, light_red = self.classify_light(light)
+        noise_status, noise_red = self.classify_noise(noise)
 
-    # ---------------- UPDATE UI ----------------
+        # update hydration drink rate / alerts using percent
+        self.update_hydration_state(current_pct, now)
 
-    def update_boxes(self, light, noise, weight):
-        # LIGHT (higher = worse)
-        light_bad = self._update_one(
-            self.light_box,
-            current=light,
-            baseline=self.light_baseline,
-            higher_is_bad=True
-        )
+        # hydration tile status (NORMAL / LOW)
+        hydr_status, hydr_red = self.classify_hydration_tile(current_pct)
 
-        # NOISE (higher = worse)
-        noise_bad = self._update_one(
-            self.noise_box,
-            current=noise,
-            baseline=self.noise_baseline,
-            higher_is_bad=True
-        )
+        # build hydration status text with rate (e.g., "LOW (8.5%/hr)")
+        rate_str = f"{self.drink_rate_per_hr:.1f}%/hr"
+        hydr_status_text = f"{hydr_status} ({rate_str})"
 
-        # HYDRATION (lower = worse)
-        hydr_bad = self._update_one(
-            self.hydr_box,
-            current=weight,
-            baseline=self.weight_baseline,
-            higher_is_bad=False,
-            is_weight=True
-        )
+        # update tiles (values only)
+        self.update_box(self.light_box, light, light_status, light_red)
+        self.update_box(self.noise_box, noise, noise_status, noise_red)
+        self.update_box(self.hydr_box, f"{int(current_pct)}%", hydr_status_text, hydr_red)
 
-        # Set warning text based on bad conditions
-        warnings = []
-        if noise_bad:
-            warnings.append("Too loud")
-        if light_bad:
-            warnings.append("Too bright")
-        if hydr_bad:
-            warnings.append("Bottle low")
+        # global bar
+        self.update_environment_bar(light_red, noise_red, hydr_red)
 
-        if warnings:
-            self.warning_label.config(text=" / ".join(warnings))
+    # ---------- CLASSIFICATION ----------
+    def classify_light(self, value):
+        margin = 0.5 * abs(self.light_baseline)
+        if value > self.light_baseline + margin:
+            return "TOO BRIGHT", True
         else:
-            self.warning_label.config(text="")
+            return "NORMAL", False
 
-    # ---------------- LOGIC (MARGIN = 0.5, PURE RED/GREEN) ----------------
+    def classify_noise(self, value):
+        margin = 0.5 * abs(self.noise_baseline)
+        if value > self.noise_baseline + margin:
+            return "LOUD", True
+        else:
+            return "NORMAL", False
 
-    def _update_one(self, box, current, baseline,
-                    higher_is_bad=True, is_weight=False):
+    def classify_hydration_tile(self, current_pct):
+        if self.is_empty or self.drink_rate_slow:
+            return "LOW", True
+        return "NORMAL", False
+
+    # ---------- HYDRATION LOGIC ----------
+    def update_hydration_state(self, current_pct, now):
         """
-        Compare current value to baseline using a 50% margin.
-        Anything outside baseline ± 0.5*baseline = RED
-        Anything inside = GREEN
+        Use percent directly:
+          - Detect refill when the level jumps.
+          - Compute drink rate (%/hr) since last refill.
+          - Flag empty when under threshold.
         """
+        if self.last_refill_time is None:
+            self.last_refill_time = now
+            self.refill_level_pct = current_pct
 
-        if is_weight:
-            box["current"].config(text=f"Current: {current:.1f} g")
-            baseline_text = f"Baseline (full): {baseline:.1f} g"
-        else:
-            box["current"].config(text=f"Current: {current:.1f}")
-            baseline_text = f"Baseline: {baseline:.1f}"
+        if self.last_weight_pct is None:
+            self.last_weight_pct = current_pct
 
-        box["baseline"].config(text=baseline_text)
+        # Detect refill as a rise of at least REFILL_RISE_MIN percent.
+        rise = current_pct - self.last_weight_pct
+        if rise >= self.REFILL_RISE_MIN:
+            self.last_refill_time = now
+            self.refill_level_pct = current_pct
 
-        delta = current - baseline
-        box["delta"].config(text=f"Change: {delta:+.1f}")
+        elapsed_sec = max(1.0, now - self.last_refill_time)
+        elapsed_hours = elapsed_sec / 60.0                      # change this to accelerate time
+                                                                # 3600.0 for normal hour
+        consumed = max(0.0, self.refill_level_pct - current_pct)
+        self.drink_rate_per_hr = consumed / elapsed_hours
+        self.drink_rate_slow = self.drink_rate_per_hr < self.SLOW_RATE_THRESHOLD
+        self.is_empty = current_pct <= self.EMPTY_THRESHOLD
+        self.last_weight_pct = current_pct
 
-        # margin = 50% of baseline
-        margin = 0.50 * abs(baseline)
+    # ---------- SERIAL → ARDUINO (LCD MESSAGES) ----------
+    def send_lcd_message(self, msg: str):
+        """
+        Send a short text command to the Arduino so it can display
+        something on the LCD. The Arduino sketch should read a line
+        from Serial and react to these messages.
+        """
+        if not self.ser:
+            return
+        try:
+            self.ser.write((msg + "\n").encode("utf-8"))
+        except Exception:
+            # if serial is gone, just ignore
+            pass
 
-        # PURE colors only
-        if higher_is_bad:
-            # light/noise: higher than baseline+margin is bad
-            if current > baseline + margin:
-                status = "Above baseline"
-                color = "#ff0000"   # PURE RED
-                is_bad = True
-            else:
-                status = "Within baseline range"
-                color = "#00ff00"   # PURE GREEN
-                is_bad = False
-        else:
-            # hydration: lower than baseline-margin means water used (bad)
-            if current < baseline - margin:
-                status = "Below baseline (water used)"
-                color = "#ff0000"   # PURE RED
-                is_bad = True
-            else:
-                status = "Within baseline range"
-                color = "#00ff00"   # PURE GREEN
-                is_bad = False
-
-        box["status"].config(text=f"Status: {status}")
+    # ---------- UI HELPERS ----------
+    def update_box(self, box, value, status_text, is_red):
+        color = "#ff0000" if is_red else "#00ff00"
         box["frame"].config(bg=color)
-        for w in box["frame"].winfo_children():
-            w.config(bg=color)
+        box["value"].config(text=str(value), bg=color)
+        box["status"].config(text=f"STATUS: {status_text}", bg=color)
 
-        return is_bad
+    def update_environment_bar(self, light_red, noise_red, hydr_red):
+        """
+        Decide the main environment status text AND a short LCD message
+        to send to the Arduino (for a 16x2 style display).
+        """
+        lcd_msg = None
+
+        if noise_red:
+            text = "ALERT: ROOM IS TOO NOISY! CHECK IN ON THE PATIENT IMMEDIATELY!"
+            bg = "#ff0000"
+            fg = "#ffffff"
+            lcd_msg = "NOISY"
+        elif light_red:
+            text = "ALERT: ROOM IS TOO BRIGHT! ADJUST THE LIGHTS FOR THE PATIENT."
+            bg = "#ff0000"
+            fg = "#ffffff"
+            lcd_msg = "TOO BRIGHT"
+        elif hydr_red:
+            if self.is_empty:
+                text = "ALERT: HYDRATION CRITICAL! REFILL THE WATER BOTTLE NOW."
+                lcd_msg = "REFILL NOW"
+            elif self.drink_rate_slow:
+                text = "ALERT: DRINKING TOO SLOW. REMIND THE PATIENT."
+                lcd_msg = "DRINK MORE"
+            else:
+                text = "ALERT: HYDRATION LOW. CHECK THE PATIENT'S WATER LEVEL."
+                lcd_msg = "LOW WATER"
+            bg = "#ff0000"
+            fg = "#ffffff"
+        else:
+            text = "ENVIRONMENT NORMAL"
+            bg = "#00ff00"
+            fg = "#000000"
+            lcd_msg = "OK"
+
+        self.env_frame.config(bg=bg)
+        self.env_label.config(text=text, bg=bg, fg=fg)
+
+        # Only send when message changes to avoid spamming the serial link
+        if lcd_msg is not None and lcd_msg != self.last_lcd_msg:
+            self.send_lcd_message(lcd_msg)
+            self.last_lcd_msg = lcd_msg
 
 
-# ---------------- MAIN ENTRY ----------------
-
+# ---------- MAIN ----------
 def main():
-    with serial.Serial(PORT, BAUD, timeout=1) as ser, open("readings.csv", "a") as log_file:
+    with serial.Serial(PORT, BAUD, timeout=1) as ser:
         root = tk.Tk()
-        app = BaselineMonitor(root, ser, log_file)
+        app = RoomEnvironmentGUI(root, ser)
         root.mainloop()
 
 

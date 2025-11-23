@@ -6,7 +6,7 @@
 // Pins
 const int PIN_SOUND = A0;       // Grove Sound
 const int PIN_LIGHT = A1;       // Grove Light
-const int PIN_POT = A4;
+const int PIN_POT = A3;
 
 rgb_lcd lcd;
 
