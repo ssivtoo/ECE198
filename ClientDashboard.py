@@ -1,185 +1,258 @@
+import serial
 import tkinter as tk
-from tkinter import font as tkfont
-import random
+
+# ---------------- SERIAL SETTINGS ----------------
+
+# CHANGE THIS TO YOUR ACTUAL ARDUINO PORT
+PORT = "/dev/cu.usbmodem14101"   # e.g. "COM3" on Windows
+BAUD = 115200
 
 
-def classify(light: int, sound: int):
-    """
-    Same idea as your interpret(): convert numbers into statuses.
-    """
-    # Light
-    if light < 200:
-        light_status = "Dark"
-    elif light < 600:
-        light_status = "Medium"
-    else:
-        light_status = "Bright"
+# ---------------- PARSE ARDUINO LINE ----------------
+# Arduino sends: lavg,smag,weight
+# Example: "601,71,-442.49"
 
-    # Noise
-    if sound < 200:
-        sound_status = "Quiet"
-    elif sound < 600:
-        sound_status = "Normal"
-    else:
-        sound_status = "Loud"
-
-    return {
-        "light": light,
-        "sound": sound,
-        "light_status": light_status,
-        "sound_status": sound_status,
-    }
+def parse_line(line: str):
+    parts = line.split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        light = int(parts[0])
+        noise = int(parts[1])
+        weight = float(parts[2])
+        return light, noise, weight
+    except ValueError:
+        return None
 
 
-def status_color(status: str) -> str:
-    s = status.lower()
-    if s in ("dark", "medium", "quiet", "normal", "ok"):
-        return "#c8f7c5"   # green-ish
-    if s in ("bright", "loud", "high"):
-        return "#ff0000"   # yellow-ish
-    if s in ("low",):
-        return "#ff0000"   # red-ish
-    return "#ff0000"       # white
+# ---------------- GUI APP ----------------
 
-
-class MonitorGUI:
-    def __init__(self, root):
+class BaselineMonitor:
+    def __init__(self, root, ser):
         self.root = root
+        self.ser = ser
 
-        self.root.title("Bedside Environment Monitor (TEST MODE)")
-        self.root.geometry("900x450")
+        self.root.title("Baseline Monitor (Light / Noise / Hydration)")
+        self.root.geometry("850x450")
 
-        # fonts
-        self.title_font = tkfont.Font(size=18, weight="bold")
-        self.value_font = tkfont.Font(size=24, weight="bold")
-        self.status_font = tkfont.Font(size=14, weight="bold")
+        # baseline values (set after calibration)
+        self.light_baseline = None
+        self.noise_baseline = None
+        self.weight_baseline = None
 
-        # Title
-        tk.Label(
+        # collect first N readings for baseline
+        self.calibrating = True
+        self.samples_needed = 20        # how many readings for baseline
+        self.sample_list = []           # list of (light, noise, weight)
+
+        # update intervals
+        self.update_ms = 500            # fast while calibrating
+        self.update_ms_after_baseline = 30000   # 30 seconds
+
+        # ------------- UI -------------
+        title = tk.Label(
             root,
-            text="ROOM ENVIRONMENT STATUS (TEST DATA)",
-            font=self.title_font,
-        ).pack(pady=10)
-
-        # frame for 3 boxes
-        boxes = tk.Frame(root)
-        boxes.pack(expand=True, fill="both", pady=5)
-        boxes.columnconfigure(0, weight=1)
-        boxes.columnconfigure(1, weight=1)
-        boxes.columnconfigure(2, weight=1)
-
-        # LIGHT box
-        self.light_box = self._make_box(boxes, 0, "LIGHT")
-
-        # NOISE box
-        self.noise_box = self._make_box(boxes, 1, "NOISE")
-
-        # HYDRATION placeholder box
-        self.hyd_box = self._make_box(boxes, 2, "HYDRATION (coming soon)")
-        self.hyd_box["value"].config(text="--")
-        self.hyd_box["status"].config(text="Status: (inactive)")
-
-        # alert label
-        self.alert_font = tkfont.Font(size=24, weight="bold")  # BIG FONT
-
-        self.alert_label = tk.Label(
-            root,
-            text="ALERT: WAITING FOR DATA...",
-            font=self.alert_font,
-            bd=4,
-            relief="groove",
-            padx=20,
-            pady=20,
-            fg="white",
-            bg="#333333",   # dark background to pop visually
-            wraplength=900,
+            text="Monitoring Noise, Light & Hydration (Baseline Based)",
+            font=("Arial", 16, "bold")
         )
+        title.pack(pady=10)
 
-        self.alert_label.pack(pady=10, fill="x", padx=20)
+        self.info_label = tk.Label(
+            root,
+            text="Calibrating baseline from first few seconds...",
+            font=("Arial", 11)
+        )
+        self.info_label.pack(pady=5)
 
-        # start periodic updates
+        main = tk.Frame(root)
+        main.pack(expand=True, fill="both", padx=10, pady=10)
+
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=1)
+        main.columnconfigure(2, weight=1)
+
+        self.light_box = self._make_box(main, 0, "LIGHT")
+        self.noise_box = self._make_box(main, 1, "NOISE")
+        self.hydr_box = self._make_box(main, 2, "HYDRATION (Bottle Weight)")
+
+        # start update loop
         self.update_loop()
 
     def _make_box(self, parent, col, title):
-        frame = tk.Frame(parent, bd=2, relief="groove", padx=20, pady=20)
-        frame.grid(row=0, column=col, padx=5, pady=5, sticky="nsew")
+        """Create one card for Light / Noise / Hydration."""
+        frame = tk.Frame(parent, bd=2, relief="groove", padx=10, pady=10)
+        frame.grid(row=0, column=col, sticky="nsew", padx=5, pady=5)
 
-        title_label = tk.Label(frame, text=title, font=self.title_font)
-        title_label.pack()
+        t = tk.Label(frame, text=title, font=("Arial", 13, "bold"))
+        t.pack()
 
-        value_label = tk.Label(frame, text="--", font=self.value_font)
-        value_label.pack(pady=10)
+        baseline_label = tk.Label(frame, text="Baseline: --", font=("Arial", 11))
+        baseline_label.pack(pady=3)
 
-        status_label = tk.Label(frame, text="Status: --", font=self.status_font)
-        status_label.pack()
+        current_label = tk.Label(frame, text="Current: --", font=("Arial", 11))
+        current_label.pack(pady=3)
 
-        return {"frame": frame, "value": value_label, "status": status_label}
+        delta_label = tk.Label(frame, text="Change: --", font=("Arial", 11))
+        delta_label.pack(pady=3)
+
+        status_label = tk.Label(frame, text="Status: --", font=("Arial", 11, "bold"))
+        status_label.pack(pady=3)
+
+        return {
+            "frame": frame,
+            "baseline": baseline_label,
+            "current": current_label,
+            "delta": delta_label,
+            "status": status_label,
+        }
+
+    # ---------------- MAIN LOOP ----------------
 
     def update_loop(self):
-        """
-        TEST MODE:
-        generate fake random values for light and sound
-        so you can see the GUI working without Arduino.
-        """
-        light = random.randint(0, 800)
-        sound = random.randint(0, 800)
+        """Read from serial and either calibrate or update UI."""
+        raw = ""
+        try:
+            raw = self.ser.readline().decode("utf-8", errors="ignore").strip()
+        except Exception:
+            pass
 
-        info = classify(light, sound)
-        self.update_ui(info)
+        data = parse_line(raw) if raw else None
 
-        # run again after 500 ms
-        self.root.after(500, self.update_loop)
+        if data:
+            light, noise, weight = data
 
-    def update_ui(self, info: dict):
-        # update LIGHT
-        self._update_box(
+            if self.calibrating:
+                self.sample_list.append((light, noise, weight))
+                remaining = self.samples_needed - len(self.sample_list)
+
+                if remaining > 0:
+                    self.info_label.config(
+                        text=f"Calibrating baseline... {remaining} samples left"
+                    )
+                else:
+                    self.set_baselines_from_samples()
+            else:
+                self.update_boxes(light, noise, weight)
+
+        self.root.after(self.update_ms, self.update_loop)
+
+    # ---------------- BASELINE ----------------
+
+    def set_baselines_from_samples(self):
+        """Average the first N samples to get baseline for all 3."""
+        n = len(self.sample_list)
+        if n == 0:
+            return
+
+        self.light_baseline = sum(s[0] for s in self.sample_list) / n
+        self.noise_baseline = sum(s[1] for s in self.sample_list) / n
+        self.weight_baseline = sum(s[2] for s in self.sample_list) / n
+
+        self.calibrating = False
+        self.sample_list = []
+
+        self.info_label.config(
+            text="Baselines set from first few seconds. Now checking every 30 seconds."
+        )
+
+        self.light_box["baseline"].config(
+            text=f"Baseline: {self.light_baseline:.1f}"
+        )
+        self.noise_box["baseline"].config(
+            text=f"Baseline: {self.noise_baseline:.1f}"
+        )
+        self.hydr_box["baseline"].config(
+            text=f"Baseline (full): {self.weight_baseline:.1f} g"
+        )
+
+        # slow down checks to every 30 seconds
+        self.update_ms = self.update_ms_after_baseline
+
+    # ---------------- UPDATE UI ----------------
+
+    def update_boxes(self, light, noise, weight):
+        # LIGHT (higher = worse)
+        self._update_one(
             self.light_box,
-            str(info["light"]),
-            info["light_status"],
+            current=light,
+            baseline=self.light_baseline,
+            higher_is_bad=True
         )
 
-        # update NOISE
-        self._update_box(
+        # NOISE (higher = worse)
+        self._update_one(
             self.noise_box,
-            str(info["sound"]),
-            info["sound_status"],
+            current=noise,
+            baseline=self.noise_baseline,
+            higher_is_bad=True
         )
 
-        # hydration box stays static for now
+        # HYDRATION (lower = worse)
+        self._update_one(
+            self.hydr_box,
+            current=weight,
+            baseline=self.weight_baseline,
+            higher_is_bad=False,
+            is_weight=True
+        )
 
-        # nurse alert
-        alerts = []
-        if info["sound_status"] == "Loud":
-            alerts.append("Room is too noisy.")
-        if info["light_status"] == "Bright":
-            alerts.append("Room is too bright for rest.")
+    # ---------------- LOGIC (MARGIN = 0.5, PURE RED/GREEN) ----------------
 
-        
-        if alerts:
-            msg = " | ".join(alerts).upper()
-            self.alert_label.config(
-            text=f"ALERT: {msg}",
-            bg="#ff0000",   # RED background when alerting
-            fg="white")
+    def _update_one(self, box, current, baseline,
+                    higher_is_bad=True, is_weight=False):
+        """
+        Compare current value to baseline using a 50% margin.
+        Anything outside baseline ± 0.5*baseline = RED
+        Anything inside = GREEN
+        """
+
+        if is_weight:
+            box["current"].config(text=f"Current: {current:.1f} g")
+            baseline_text = f"Baseline (full): {baseline:.1f} g"
         else:
-            self.alert_label.config(
-            text="ENVIRONMENT IS WITHIN TARGET RANGE",
-            bg="#008000",   # GREEN background when safe
-            fg="white"
-        )
+            box["current"].config(text=f"Current: {current:.1f}")
+            baseline_text = f"Baseline: {baseline:.1f}"
 
+        box["baseline"].config(text=baseline_text)
 
-    def _update_box(self, box, value_text, status_text):
-        box["value"].config(text=value_text)
-        box["status"].config(text=f"Status: {status_text}")
+        delta = current - baseline
+        box["delta"].config(text=f"Change: {delta:+.1f}")
 
-        bg = status_color(status_text)
-        box["frame"].config(bg=bg)
+        # margin = 50% of baseline
+        margin = 0.50 * abs(baseline)
+
+        # PURE colors only
+        if higher_is_bad:
+            # light/noise: higher than baseline+margin is bad
+            if current > baseline + margin:
+                status = "Above baseline"
+                color = "#ff0000"   # PURE RED
+            else:
+                status = "Within baseline range"
+                color = "#00ff00"   # PURE GREEN
+        else:
+            # hydration: lower than baseline-margin means water used (bad)
+            if current < baseline - margin:
+                status = "Below baseline (water used)"
+                color = "#ff0000"   # PURE RED
+            else:
+                status = "Within baseline range"
+                color = "#00ff00"   # PURE GREEN
+
+        box["status"].config(text=f"Status: {status}")
+        box["frame"].config(bg=color)
         for w in box["frame"].winfo_children():
-            w.config(bg=bg)
+            w.config(bg=color)
+
+
+# ---------------- MAIN ENTRY ----------------
+
+def main():
+    with serial.Serial(PORT, BAUD, timeout=1) as ser:
+        root = tk.Tk()
+        app = BaselineMonitor(root, ser)
+        root.mainloop()
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MonitorGUI(root)
-    root.mainloop()
+    main()
