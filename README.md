@@ -6,6 +6,11 @@ A real-time IoT patient monitoring system that continuously tracks environmental
 
 Hospital delirium is triggered by disrupted sleep (noise, light) and dehydration. Current clinical practice relies on **periodic manual checks** — leaving dangerous conditions undetected for hours. We built a system that catches them in under a second.
 
+
+<img width="428" height="571" alt="ECE198_Photo1" src="https://github.com/user-attachments/assets/390a0a97-9309-4dcb-8202-227d61318830" />
+
+<img width="571" height="189" alt="ECE198_Pjoto2" src="https://github.com/user-attachments/assets/64ff277f-da90-4f0d-8eda-60ace6a531db" />
+
 ## System Architecture
 
 ```
